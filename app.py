@@ -1,28 +1,39 @@
-"""Explorador del límite comercial (ciclamen).
+"""Umbral de descarte: cómo ubican los modelos a cada planta según el umbral elegido.
 
 Lee los CSV por imagen del experimento 23 (modelo, shots, seed, image_name,
 mask_ratio_real, mask_ratio_pred) que estén junto a este archivo, o los que se
-suban desde la barra lateral. Fotos opcionales en fotos/ y mascaras/
-(ver preparar_fotos.py).   Uso:  streamlit run app.py
+suban desde la barra lateral. Fotos opcionales en fotos.zip (o carpetas fotos/ y
+mascaras/). Estilo: style_fitba.py.   Uso:  streamlit run app.py
 """
 import glob
 import io
 import os
 import zipfile
+
 import numpy as np
 import pandas as pd
-import altair as alt
+import plotly.graph_objects as go
 import streamlit as st
 from PIL import Image
 
+from style_fitba import (aplicar_estilo, pulir_figura, encabezado_modulo, titulo_seccion,
+                         sidebar_marca, sidebar_seccion, tarjeta, estado_vacio,
+                         GREEN, COLOR_ALERT, COLOR_WARN, COLOR_HUM, COLOR_NEUTRAL)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
-st.set_page_config(page_title="Límite comercial - ciclamen", layout="wide")
+st.set_page_config(page_title="Umbral de descarte | Vivero", page_icon="🌱", layout="wide")
+aplicar_estilo()
+
+MODELOS = {"06_allspecies_baseline": "Sin ponderación",
+           "08_allspecies_sqrt": "Ponderación suave",
+           "12_allspecies_inverse": "Ponderación intensa"}
 REQ = ["modelo", "shots", "seed", "image_name", "mask_ratio_real", "mask_ratio_pred"]
 OK, FN, FP, REV = "Correcta", "Dañada aprobada", "Buena descartada", "A revisión"
-COM, NOC = "Comercializable", "No comercializable"
-COLORS = {OK: "#8c8c8c", FN: "#d62728", FP: "#ff7f0e", REV: "#1f77b4"}
+COLORES = {OK: COLOR_NEUTRAL, FN: COLOR_ALERT, FP: COLOR_WARN, REV: COLOR_HUM}
+ZIP = os.path.join(HERE, "fotos.zip")
 
 
+# ----------------------------- Datos -----------------------------
 @st.cache_data
 def demo_data():
     """Datos SIMULADOS solo para probar la app. No usar en el informe."""
@@ -31,58 +42,45 @@ def demo_data():
     for seed in (11, 22, 33, 44, 55):
         for i in range(30):
             real = float(np.clip(rng.lognormal(-3.4, 0.9), 0.002, 0.6))
-            for shots, bias, noise in [(0, 0.35, 0.6), (50, 0.8, 0.35), (120, 0.9, 0.25)]:
-                pred = float(np.clip(real * bias * rng.lognormal(0, noise), 0, 1))
-                rows.append(dict(modelo="demo", shots=shots, seed=seed, image_name=f"s{seed}_{i}.jpg",
-                                 mask_ratio_real=real, mask_ratio_pred=pred))
+            for mod in MODELOS:
+                for shots, bias, noise in [(0, 0.35, 0.6), (50, 0.8, 0.35), (120, 0.9, 0.25)]:
+                    pred = float(np.clip(real * bias * rng.lognormal(0, noise), 0, 1))
+                    rows.append(dict(modelo=mod, shots=shots, seed=seed, image_name=f"s{seed}_{i}.jpg",
+                                     mask_ratio_real=real, mask_ratio_pred=pred))
     return pd.DataFrame(rows)
 
 
-def load(files):
+def cargar(files):
     df = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
-    miss = [c for c in REQ if c not in df.columns]
-    if miss:
-        st.error(f"Faltan columnas: {miss}")
+    faltan = [c for c in REQ if c not in df.columns]
+    if faltan:
+        st.error(f"Faltan columnas en los CSV: {faltan}")
         st.stop()
     return df
 
 
-def decide(real, pred, T, m):
-    """Real: no comercializable si daño >= T. Decisión: según la predicción vs T ± m."""
-    pos = real >= T
-    dec = np.where(pred >= T + m, NOC, np.where(pred < T - m, COM, REV))
-    out = np.where(dec == REV, REV, np.where((dec == NOC) == pos, OK, np.where(pos, FN, FP)))
-    return pos, dec, out
+@st.cache_data
+def zip_estado(path, mtime):
+    """None si no existe, True si es un zip válido, o un texto con lo que realmente contiene."""
+    if not os.path.exists(path):
+        return None
+    if zipfile.is_zipfile(path):
+        return True
+    with open(path, "rb") as f:
+        ini = f.read(50)
+    return f"El archivo pesa {os.path.getsize(path):,} bytes y empieza con: {ini!r}"
 
 
-def losses(out, P, C, R):
-    return np.where(out == FP, P, np.where(out == FN, C, np.where(out == REV, R, 0.0)))
+def estado_zip():
+    return zip_estado(ZIP, os.path.getmtime(ZIP) if os.path.exists(ZIP) else 0)
 
 
-def rates(d, T, m):
-    pos, _, out = decide(d["real"].to_numpy(), d["pred"].to_numpy(), T, m)
-    o = pd.Series(out)
-    auto = (o != REV).sum()
-    return {"Dañadas aprobadas (%)": 100 * (o == FN).sum() / pos.sum() if pos.sum() else np.nan,
-            "Buenas descartadas (%)": 100 * (o == FP).sum() / (~pos).sum() if (~pos).any() else np.nan,
-            "A revisión (%)": 100 * (o == REV).mean(),
-            "Acierto automático (%)": 100 * (o == OK).sum() / auto if auto else np.nan}
-
-
-def summarize(d, T, m):
-    per = pd.DataFrame([rates(g, T, m) for _, g in d.groupby("seed")])
-    return rates(d, T, m), per.mean(), per.std()
-
-
-ZIP = os.path.join(HERE, "fotos.zip")
-
-
-def _abrir(rel):
+def abrir(rel):
     """Abre fotos/x.jpg o mascaras/x.png desde la carpeta o desde fotos.zip."""
     p = os.path.join(HERE, rel)
     if os.path.exists(p):
         return open(p, "rb")
-    if os.path.exists(ZIP):
+    if estado_zip() is True:
         with zipfile.ZipFile(ZIP) as z:
             try:
                 return io.BytesIO(z.read(rel))
@@ -91,12 +89,12 @@ def _abrir(rel):
     return None
 
 
-def foto(name, overlay):
-    f = _abrir(f"fotos/{name}")
+def foto(nombre, marcar):
+    f = abrir(f"fotos/{nombre}")
     if f is None:
         return None
     im = Image.open(f).convert("RGB")
-    mf = _abrir(f"mascaras/{os.path.splitext(name)[0]}.png") if overlay else None
+    mf = abrir(f"mascaras/{os.path.splitext(nombre)[0]}.png") if marcar else None
     if mf is not None:
         mk = np.array(Image.open(mf).convert("L").resize(im.size, Image.NEAREST)) > 0
         a = np.array(im).astype(float)
@@ -105,155 +103,197 @@ def foto(name, overlay):
     return im
 
 
-# ----------------------------- Datos -----------------------------
-st.title("Límite comercial: ¿dónde ubica el modelo a cada planta?")
-files = st.sidebar.file_uploader("CSV por imagen (opcional)", type="csv", accept_multiple_files=True)
+# ----------------------------- Lógica de decisión -----------------------------
+def clasificar(real, pred, T, Rv):
+    """Daño real >= T = no comercializable. Se descarta si el estimado >= T; va a revisión si
+    Rv <= estimado < T (cuando hay umbral de revisión); si no, se aprueba."""
+    pos = real >= T
+    desc = pred >= T
+    rev = (pred >= Rv) & ~desc if Rv is not None else np.zeros(len(pred), bool)
+    out = np.where(rev, REV, np.where(desc == pos, OK, np.where(pos, FN, FP)))
+    return pos, desc, rev, out
+
+
+def etiquetas(cuts):
+    return [f"≤{cuts[0]:g}%"] + [f"{a:g}–{b:g}%" for a, b in zip(cuts, cuts[1:])] + [f">{cuts[-1]:g}%"]
+
+
+def matriz(d, cuts_real, cuts_pred, idx_rev):
+    br, bp = [-np.inf] + cuts_real + [np.inf], [-np.inf] + cuts_pred + [np.inf]
+    lr, lp = etiquetas(cuts_real), etiquetas(cuts_pred)
+    if idx_rev is not None:
+        lp[idx_rev] += "<br>revisión"
+    rr = pd.cut(d["real"], br, labels=lr, right=True)
+    rp = pd.cut(d["pred"], bp, labels=lp, right=True)
+    n = pd.crosstab(rr, rp, dropna=False).reindex(index=lr, columns=lp, fill_value=0).to_numpy()
+    tot = n.sum(axis=1, keepdims=True)
+    pct = np.divide(n, tot, out=np.zeros(n.shape), where=tot > 0) * 100
+    txt = [[f"<b>{n[i, j]}</b><br>{pct[i, j]:.0f} %" for j in range(n.shape[1])] for i in range(n.shape[0])]
+    fig = go.Figure(go.Heatmap(
+        z=pct, x=lp, y=lr, text=txt, texttemplate="%{text}", textfont=dict(size=15), showscale=False,
+        colorscale=[[0, "#EEF3EF"], [1, GREEN]], zmin=0, zmax=100, xgap=3, ygap=3,
+        hovertemplate="Real %{y}<br>Estimado %{x}<br>%{z:.0f} % de la fila<extra></extra>"))
+    pulir_figura(fig, altura=340)
+    fig.update_xaxes(title="Lo que estimó el modelo", type="category", showgrid=False)
+    fig.update_yaxes(title="Daño real (máscara manual)", type="category", autorange="reversed", showgrid=False)
+    return fig
+
+
+def dispersion(g, T, T2, Rv):
+    lim = max(g[["real", "pred"]].max().max() * 1.05, (T2 or T) * 1.3)
+    fig = go.Figure()
+    for cat, color in COLORES.items():
+        s = g[g["resultado"] == cat]
+        fig.add_trace(go.Scatter(x=s["real"], y=s["pred"], mode="markers", name=cat, text=s["image_name"],
+                                 marker=dict(color=color, size=7, opacity=.8),
+                                 hovertemplate="%{text}<br>real %{x:.1f} %<br>estimado %{y:.1f} %<extra></extra>"))
+    for v, dash in [(T, "dash"), (T2, "dot"), (Rv, "dot")]:
+        if v is not None:
+            fig.add_vline(x=v, line=dict(dash=dash, width=1, color="#4A5D53"))
+            fig.add_hline(y=v, line=dict(dash=dash, width=1, color="#4A5D53"))
+    pulir_figura(fig, altura=380)
+    fig.update_xaxes(title="Daño real (%)", range=[0, lim])
+    fig.update_yaxes(title="Daño estimado (%)", range=[0, lim])
+    return fig
+
+
+# ----------------------------- Carga y filtros -----------------------------
+sidebar_marca("Vivero", "🌱", "Umbral de descarte · Evaluación de modelos")
+files = None
+with st.sidebar.expander("Cargar otros datos"):
+    files = st.file_uploader("CSV por imagen", type="csv", accept_multiple_files=True)
 local = sorted(glob.glob(os.path.join(HERE, "resultados_test_por_imagen_*.csv")))
 if files:
-    raw = load(files)
+    raw = cargar(files)
 elif local:
-    raw = load(local)
+    raw = cargar(local)
 else:
     st.warning("Mostrando datos SIMULADOS de demostración. Subí los CSV del experimento 23 "
                "(resultados_test_por_imagen_*.csv) para ver los resultados reales.")
     raw = demo_data()
+raw = raw[raw["modelo"].isin(MODELOS)].copy()
+if raw.empty:
+    st.error("Los CSV no contienen los modelos entrenados con todas las especies "
+             f"({', '.join(MODELOS)}).")
+    st.stop()
 raw["real"] = raw["mask_ratio_real"] * 100
 raw["pred"] = raw["mask_ratio_pred"] * 100
 
-modelo = st.sidebar.selectbox("Modelo", sorted(raw["modelo"].unique()))
-shots = st.sidebar.selectbox("Imágenes de adaptación", sorted(raw["shots"].unique()),
-                             index=len(raw["shots"].unique()) - 1)
-df = raw[(raw["modelo"] == modelo) & (raw["shots"] == shots)].reset_index(drop=True)
+sidebar_seccion("Imágenes de adaptación")
+opciones = sorted(raw["shots"].unique())
+shots = st.sidebar.radio("Adaptación", opciones, index=len(opciones) - 1, label_visibility="collapsed",
+                         format_func=lambda s: "Sin adaptación" if s == 0 else f"{s} imágenes")
 
-st.sidebar.markdown("### Límite comercial")
-T = st.sidebar.slider("No comercializable si el daño real es ≥ (% de la imagen)", 0.5, 30.0, 5.0, 0.5)
-m = st.sidebar.slider("Zona de revisión (± puntos porcentuales)", 0.0, 5.0, 0.0, 0.25,
-                      help="Si la estimación cae cerca del límite, la planta no se decide sola: va a revisión manual.")
-st.sidebar.markdown("### Dinero (valores a definir con la Cooperativa)")
-P = st.sidebar.number_input("Precio de una planta sana ($)", 0.0, value=1000.0, step=50.0,
-                            help="Es lo que se pierde si una planta buena se descarta por error.")
-C = st.sidebar.number_input("Pérdida por planta dañada vendida ($)", 0.0, value=1500.0, step=50.0,
-                            help="Devolución, reposición o reclamo cuando una planta dañada llega al cliente.")
-R = st.sidebar.number_input("Costo de revisar una planta a mano ($)", 0.0, value=50.0, step=10.0)
+sidebar_seccion("Umbral de descarte")
+T = st.sidebar.slider("Se descarta si el daño es ≥ (% de la imagen)", 0.5, 30.0, 5.0, 0.5)
 
-# ----------------------------- Cálculos -----------------------------
-d = df.copy()
-pos, d["decision"], d["resultado"] = decide(d["real"].to_numpy(), d["pred"].to_numpy(), T, m)
-d["real_cls"] = np.where(pos, NOC, COM)
-d["perdida"] = losses(d["resultado"].to_numpy(), P, C, R)
-n = len(d)
-pooled, mean, sd = summarize(df, T, m)
+sidebar_seccion("Segundo umbral")
+usa_t2 = st.sidebar.checkbox("Agregar segundo umbral", True,
+                             help="Separa daños moderados de graves. Desmarcalo para una matriz binaria.")
+T2 = st.sidebar.slider("Segundo umbral (% de la imagen)", T + 0.5, 40.0, float(max(20.0, T + 0.5)), 0.5) if usa_t2 else None
 
-st.caption(f"{n} plantas de prueba ({df['seed'].nunique()} splits disjuntos). El daño real sale de la máscara manual; "
-           "una planta 'no comercializable' es la que tiene un daño real ≥ al límite.")
-cols = st.columns(4)
-for c, k in zip(cols, pooled):
-    c.metric(k, f"{pooled[k]:.1f}")
-    c.caption(f"media ± SD entre splits: {mean[k]:.1f} ± {sd[k]:.1f}")
+sidebar_seccion("Umbral de revisión")
+usa_rv = st.sidebar.checkbox("Usar umbral de revisión", False, disabled=T < 1.5,
+                             help="Las plantas con daño estimado entre este valor y el umbral de descarte "
+                                  "no se deciden solas: van a revisión manual.")
+Rv = st.sidebar.slider("Revisar desde (% estimado)", 0.5, T - 0.5, float(min(3.0, T - 0.5)), 0.5) \
+    if usa_rv and T >= 1.5 else None
 
-with_sys = d["perdida"].sum() / n * 1000
-no_ctrl = pos.mean() * C * 1000
-all_manual = R * 1000
-cols = st.columns(4)
-cols[0].metric("Pérdida con el sistema (por 1000 plantas)", f"${with_sys:,.0f}")
-cols[1].metric("Sin ningún control", f"${no_ctrl:,.0f}", help="Se vende todo: solo hay pérdida por las dañadas.")
-cols[2].metric("Revisando todo a mano", f"${all_manual:,.0f}", help="Se supone una revisión manual sin errores.")
-cols[3].metric("Ahorro frente a no controlar", f"{100 * (1 - with_sys / no_ctrl):.0f} %" if no_ctrl else "-")
+# ----------------------------- Cálculo por modelo -----------------------------
+D = {}
+for cod in MODELOS:
+    g = raw[(raw["modelo"] == cod) & (raw["shots"] == shots)].reset_index(drop=True)
+    if g.empty:
+        continue
+    _, _, _, g["resultado"] = clasificar(g["real"].to_numpy(), g["pred"].to_numpy(), T, Rv)
+    g["dañada"] = g["real"] >= T
+    D[cod] = g
+if not D:
+    estado_vacio("No hay resultados para esa cantidad de imágenes de adaptación.")
+    st.stop()
 
-den = n - (d["resultado"] == REV).sum()
-if den > 0:
-    r_star = d.loc[d["resultado"].isin([FN, FP]), "perdida"].sum() / den
-    st.caption(f"Con estos valores, el sistema le gana a revisar todas las plantas a mano solo si revisar una planta "
-               f"cuesta más de **${r_star:,.0f}**.")
+cuts_real = [T] + ([T2] if T2 else [])
+cuts_pred = ([Rv] if Rv is not None else []) + cuts_real
+idx_rev = 1 if Rv is not None else None
 
-t1, t2, t3, t4, t5 = st.tabs(["Matriz de rangos", "Decisión y dinero", "Real vs. estimado", "Fotos", "Detalle"])
+encabezado_modulo("Umbral de descarte",
+                  "Definí desde qué porcentaje de daño se descarta una planta y compará cómo la ubican los tres "
+                  "modelos entrenados con todas las especies.")
+n_plantas = len(next(iter(D.values())))
+partes = [f"descarte desde {T:g} %"] + ([f"segundo umbral {T2:g} %"] if T2 else []) + \
+         ([f"revisión desde {Rv:g} %"] if Rv is not None else [])
+st.caption(f"{n_plantas} plantas de prueba · " + " · ".join(partes) + ". El daño real sale de la máscara manual.")
 
-# ----------------------------- Matriz de rangos -----------------------------
-with t1:
-    OPTS = {f"Según el límite (≤{T:g} % / >{T:g} %)": [T],
-            "Niveles del informe (≤5 / 5–20 / >20 %)": [5, 20],
-            "Detalle (≤2 / 2–5 / 5–10 / 10–20 / >20 %)": [2, 5, 10, 20]}
-    cuts = OPTS[st.radio("Rangos de la matriz", list(OPTS), horizontal=True,
-                         help="Cada planta se ubica en un rango de daño: el real (filas) y el que le asignó el modelo (columnas).")]
-    bins = [-np.inf] + cuts + [np.inf]
-    labs = [f"≤{cuts[0]:g}%"] + [f"{a:g}–{b:g}%" for a, b in zip(cuts, cuts[1:])] + [f">{cuts[-1]:g}%"]
-    rr = pd.cut(d["real"], bins, labels=labs, right=True)
-    rp = pd.cut(d["pred"], bins, labels=labs, right=True)
-    long = pd.crosstab(rr, rp, dropna=False).stack().rename("n").reset_index()
-    long.columns = ["Rango real", "Rango asignado", "n"]
-    long["pct"] = long["n"] / long.groupby("Rango real", observed=False)["n"].transform("sum").replace(0, np.nan) * 100
-    long["txt"] = [f"{a} ({0 if pd.isna(b) else b:.0f}%)" for a, b in zip(long["n"], long["pct"])]
-    base = alt.Chart(long).encode(x=alt.X("Rango asignado:N", sort=labs, title="Rango asignado por el modelo"),
-                                  y=alt.Y("Rango real:N", sort=labs, title="Rango real (máscara manual)"))
-    st.altair_chart(base.mark_rect().encode(color=alt.Color("pct:Q", scale=alt.Scale(scheme="blues", domain=[0, 100]),
-                                                            legend=None)) +
-                    base.mark_text(fontSize=16).encode(text="txt:N"), width="stretch", height=380)
-    dist = (rr.cat.codes - rp.cat.codes).abs()
-    st.caption(f"Rango correcto: **{100 * (dist == 0).mean():.1f} %** · rango vecino: {100 * (dist == 1).mean():.1f} % · "
-               f"equivocada por 2 o más rangos: {100 * (dist >= 2).mean():.1f} %. "
-               "Cada celda muestra la cantidad de plantas y el porcentaje de su fila.")
+tab1, tab2, tab3 = st.tabs(["Matrices", "Fotos", "Real vs. estimado"])
 
-# ----------------------------- Decisión y dinero -----------------------------
-with t2:
-    idx = pd.MultiIndex.from_product([[COM, NOC], [COM, REV, NOC]], names=["real_cls", "decision"])
-    g = (d.groupby(["real_cls", "decision"]).agg(n=("perdida", "size"), perdida=("perdida", "sum"))
-         .reindex(idx, fill_value=0).reset_index())
-    g["Real"] = g["real_cls"].map({COM: "Sana (comercializable)", NOC: "Dañada (no comercializable)"})
-    g["Decisión"] = g["decision"]
-    base = alt.Chart(g).encode(x=alt.X("Decisión:N", sort=[COM, REV, NOC], title="Decisión del sistema"),
-                               y=alt.Y("Real:N", sort=["Sana (comercializable)", "Dañada (no comercializable)"],
-                                       title="Estado real"))
-    heat = base.mark_rect().encode(color=alt.Color("perdida:Q", scale=alt.Scale(scheme="oranges"), legend=None))
-    st.altair_chart(heat + base.mark_text(fontSize=16, dy=-10).encode(text=alt.Text("n:Q", format=".0f")) +
-                    base.mark_text(fontSize=13, dy=12).encode(text=alt.Text("perdida:Q", format="$,.0f")),
-                    width="stretch", height=300)
-    st.caption(f"Cada celda: cantidad de plantas y pérdida en $. Sana descartada = venta perdida (${P:,.0f} c/u); "
-               f"dañada vendida = ${C:,.0f} c/u; a revisión = ${R:,.0f} c/u. "
-               f"Pérdida total en estas {n} plantas: ${d['perdida'].sum():,.0f}.")
-
-# ----------------------------- Real vs estimado -----------------------------
-with t3:
-    lim = max(T * 2, d[["real", "pred"]].max().max()) * 1.05
-    sc = alt.Chart(d).mark_circle(size=60, opacity=.75).encode(
-        x=alt.X("real:Q", title="Daño real (%)", scale=alt.Scale(domain=[0, lim])),
-        y=alt.Y("pred:Q", title="Daño estimado por el modelo (%)", scale=alt.Scale(domain=[0, lim])),
-        color=alt.Color("resultado:N", scale=alt.Scale(domain=list(COLORS), range=list(COLORS.values()))),
-        tooltip=["image_name", "seed", alt.Tooltip("real:Q", format=".1f"), alt.Tooltip("pred:Q", format=".1f"), "resultado"])
-    v = alt.Chart(pd.DataFrame({"v": [T]})).mark_rule(strokeDash=[4, 4]).encode(x="v:Q")
-    h = alt.Chart(pd.DataFrame({"v": sorted({T - m, T + m})})).mark_rule(strokeDash=[4, 4]).encode(y="v:Q")
-    st.altair_chart(sc + v + h, width="stretch", height=450)
+# ----------------------------- Matrices y comparación -----------------------------
+with tab1:
+    for col, (cod, g) in zip(st.columns(3, gap="medium"), D.items()):
+        with col, tarjeta():
+            titulo_seccion(MODELOS[cod], "Todas las especies")
+            st.plotly_chart(matriz(g, cuts_real, cuts_pred, idx_rev), width="stretch",
+                            config={"displayModeBar": False}, key=f"mx_{cod}")
+    st.caption("Cada celda muestra la cantidad de plantas y el porcentaje de su fila (rango real). "
+               "La diagonal es el rango bien asignado." +
+               (" La columna 'revisión' reúne las plantas que van a revisión manual." if Rv is not None else ""))
+    filas = []
+    for cod, g in D.items():
+        o, pos = g["resultado"], g["dañada"]
+        filas.append({"Modelo": MODELOS[cod],
+                      "Dañadas descartadas (%)": 100 * ((o == OK) & pos).sum() / max(pos.sum(), 1),
+                      "Dañadas aprobadas por error (%)": 100 * (o == FN).sum() / max(pos.sum(), 1),
+                      "Buenas descartadas por error (%)": 100 * (o == FP).sum() / max((~pos).sum(), 1),
+                      "A revisión (% del total)": 100 * (o == REV).mean()})
+    with tarjeta():
+        titulo_seccion("Comparación de los tres modelos",
+                       f"Con descarte desde {T:g} %: dañada = daño real ≥ {T:g} %.")
+        st.dataframe(pd.DataFrame(filas).round(1), hide_index=True, width="stretch")
 
 # ----------------------------- Fotos -----------------------------
-with t4:
-    if not (os.path.isdir(os.path.join(HERE, "fotos")) or os.path.exists(ZIP)):
-        st.info("Todavía no hay fotos. Subí fotos.zip (generado con preparar_fotos.py o con la celda de Colab) "
-                "junto a esta app.")
-    else:
-        a, b, c = st.columns(3)
-        modo = a.selectbox("Plantas a mostrar", [FN, FP, REV, "Todas"],
+with tab2:
+    est = estado_zip()
+    hay_carpeta = os.path.isdir(os.path.join(HERE, "fotos"))
+    with tarjeta():
+        a, b, c = st.columns([2, 2, 1])
+        cod = a.selectbox("Modelo", list(D), format_func=MODELOS.get)
+        modo = b.selectbox("Plantas a mostrar", ["Dañadas aprobadas por error", "Buenas descartadas por error",
+                                                 "A revisión", "Todas"],
                            help="Se muestran primero las de mayor diferencia entre daño real y estimado.")
-        k = b.slider("Cantidad", 4, 16, 8, 4)
-        ov = c.checkbox("Marcar la zona dañada (máscara manual)", True)
-        sel = d if modo == "Todas" else d[d["resultado"] == modo]
-        sel = sel.assign(err=(sel["pred"] - sel["real"]).abs()).sort_values("err", ascending=False).head(k)
-        if sel.empty:
-            st.write("No hay plantas en esta categoría con el límite actual.")
+        k = c.selectbox("Cantidad", [4, 8, 12, 16], index=1)
+        marcar = st.checkbox("Marcar la zona dañada (máscara manual)", True)
+    g = D[cod]
+    cat = {"Dañadas aprobadas por error": FN, "Buenas descartadas por error": FP, "A revisión": REV}.get(modo)
+    sel = g if cat is None else g[g["resultado"] == cat]
+    sel = sel.assign(err=(sel["pred"] - sel["real"]).abs()).sort_values("err", ascending=False)
+    if isinstance(est, str) and not hay_carpeta:
+        st.error("fotos.zip está en el repositorio pero no es un zip válido (subida incompleta, archivo vacío "
+                 "o con otro formato). Volvé a generarlo y subirlo. " + est)
+    elif not (hay_carpeta or est is True):
+        estado_vacio("Todavía no hay fotos. Subí fotos.zip (generado con preparar_fotos.py o con la celda de "
+                     "Colab) junto a esta app.")
+    elif sel.empty:
+        estado_vacio("No hay plantas en esta categoría con los umbrales actuales.")
+    else:
+        sel = sel.head(k)
         for i in range(0, len(sel), 4):
             for col, (_, r) in zip(st.columns(4), sel.iloc[i:i + 4].iterrows()):
-                im = foto(r["image_name"], ov)
-                if im is not None:
-                    col.image(im, caption=f"{r['image_name']} · real {r['real']:.1f}% · estimado {r['pred']:.1f}% · {r['resultado']}")
-                else:
-                    col.caption(f"{r['image_name']}: sin foto")
+                with col, tarjeta():
+                    im = foto(r["image_name"], marcar)
+                    if im is not None:
+                        st.image(im)
+                    st.caption(f"{r['image_name']} · real {r['real']:.1f} % · estimado {r['pred']:.1f} % · "
+                               f"{r['resultado']}")
+    with st.expander("Lista de plantas mal clasificadas o a revisión"):
+        e = g[g["resultado"] != OK].assign(error_pp=lambda x: x["pred"] - x["real"])
+        e = e[["image_name", "seed", "real", "pred", "error_pp", "resultado"]].round(2)
+        e = e.sort_values("error_pp", key=abs, ascending=False)
+        st.dataframe(e, hide_index=True, width="stretch")
+        st.download_button("Descargar CSV", e.to_csv(index=False), "plantas_a_revisar.csv")
 
-# ----------------------------- Detalle -----------------------------
-with t5:
-    st.markdown("**Todos los modelos con este límite**")
-    comp = pd.DataFrame([{"modelo": k[0], "shots": k[1], **rates(g_, T, m)} for k, g_ in raw.groupby(["modelo", "shots"])])
-    st.dataframe(comp.round(1), hide_index=True)
-    st.markdown("**Plantas mal clasificadas**")
-    e = d[d["resultado"] != OK].assign(error_pp=lambda x: x["pred"] - x["real"])
-    e = e[["image_name", "seed", "real", "pred", "error_pp", "resultado", "perdida"]].round(2)
-    e = e.sort_values("error_pp", key=abs, ascending=False)
-    st.dataframe(e, hide_index=True)
-    st.download_button("Descargar CSV", e.to_csv(index=False), "mal_clasificadas.csv")
+# ----------------------------- Real vs estimado -----------------------------
+with tab3:
+    for col, (cod, g) in zip(st.columns(3, gap="medium"), D.items()):
+        with col, tarjeta():
+            titulo_seccion(MODELOS[cod], "Líneas: umbrales elegidos")
+            st.plotly_chart(dispersion(g, T, T2, Rv), width="stretch", config={"displayModeBar": False},
+                            key=f"sc_{cod}")
