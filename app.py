@@ -18,7 +18,7 @@ from PIL import Image
 
 from style_fitba import (aplicar_estilo, pulir_figura, encabezado_modulo, titulo_seccion,
                          sidebar_marca, sidebar_seccion, tarjeta, estado_vacio,
-                         GREEN, COLOR_ALERT, COLOR_WARN, COLOR_HUM, COLOR_NEUTRAL)
+                         GREEN, INK, COLOR_ALERT, COLOR_WARN, COLOR_HUM, COLOR_NEUTRAL)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 st.set_page_config(page_title="Umbral de descarte | Vivero", page_icon="🌱", layout="wide")
@@ -50,8 +50,8 @@ def demo_data():
     return pd.DataFrame(rows)
 
 
-def cargar(files):
-    df = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
+def cargar(paths):
+    df = pd.concat([pd.read_csv(f) for f in paths], ignore_index=True)
     faltan = [c for c in REQ if c not in df.columns]
     if faltan:
         st.error(f"Faltan columnas en los CSV: {faltan}")
@@ -118,6 +118,14 @@ def etiquetas(cuts):
     return [f"≤{cuts[0]:g}%"] + [f"{a:g}–{b:g}%" for a, b in zip(cuts, cuts[1:])] + [f">{cuts[-1]:g}%"]
 
 
+def estilo_ejes(fig, x, y, xk=None, yk=None):
+    """Ejes con texto oscuro y en negrita: legible aunque el sistema esté en modo oscuro."""
+    fig.update_xaxes(title=dict(text=f"<b>{x}</b>", font=dict(color=INK, size=14)),
+                     tickfont=dict(color=INK, size=13), **(xk or {}))
+    fig.update_yaxes(title=dict(text=f"<b>{y}</b>", font=dict(color=INK, size=14)),
+                     tickfont=dict(color=INK, size=13), **(yk or {}))
+
+
 def matriz(d, cuts_real, cuts_pred, idx_rev):
     br, bp = [-np.inf] + cuts_real + [np.inf], [-np.inf] + cuts_pred + [np.inf]
     lr, lp = etiquetas(cuts_real), etiquetas(cuts_pred)
@@ -128,14 +136,16 @@ def matriz(d, cuts_real, cuts_pred, idx_rev):
     n = pd.crosstab(rr, rp, dropna=False).reindex(index=lr, columns=lp, fill_value=0).to_numpy()
     tot = n.sum(axis=1, keepdims=True)
     pct = np.divide(n, tot, out=np.zeros(n.shape), where=tot > 0) * 100
-    txt = [[f"<b>{n[i, j]}</b><br>{pct[i, j]:.0f} %" for j in range(n.shape[1])] for i in range(n.shape[0])]
     fig = go.Figure(go.Heatmap(
-        z=pct, x=lp, y=lr, text=txt, texttemplate="%{text}", textfont=dict(size=15), showscale=False,
-        colorscale=[[0, "#EEF3EF"], [1, GREEN]], zmin=0, zmax=100, xgap=3, ygap=3,
-        hovertemplate="Real %{y}<br>Estimado %{x}<br>%{z:.0f} % de la fila<extra></extra>"))
-    pulir_figura(fig, altura=340)
-    fig.update_xaxes(title="Lo que estimó el modelo", type="category", showgrid=False)
-    fig.update_yaxes(title="Daño real (máscara manual)", type="category", autorange="reversed", showgrid=False)
+        z=pct, x=lp, y=lr, showscale=False, colorscale=[[0, "#EEF3EF"], [1, GREEN]], zmin=0, zmax=100,
+        xgap=3, ygap=3, hovertemplate="Real %{y}<br>Estimado %{x}<br>%{z:.0f} % de la fila<extra></extra>"))
+    pulir_figura(fig, altura=460)
+    estilo_ejes(fig, "Lo que estimó el modelo", "Daño real (máscara manual)",
+                xk=dict(type="category", showgrid=False), yk=dict(type="category", autorange="reversed", showgrid=False))
+    for i, r in enumerate(lr):          # texto de cada celda con contraste explícito
+        for j, c in enumerate(lp):
+            fig.add_annotation(x=c, y=r, showarrow=False, text=f"<b>{n[i, j]}</b><br>{pct[i, j]:.0f} %",
+                               font=dict(size=18, color="#FFFFFF" if pct[i, j] > 55 else INK))
     return fig
 
 
@@ -145,31 +155,26 @@ def dispersion(g, T, T2, Rv):
     for cat, color in COLORES.items():
         s = g[g["resultado"] == cat]
         fig.add_trace(go.Scatter(x=s["real"], y=s["pred"], mode="markers", name=cat, text=s["image_name"],
-                                 marker=dict(color=color, size=7, opacity=.8),
+                                 marker=dict(color=color, size=8, opacity=.8),
                                  hovertemplate="%{text}<br>real %{x:.1f} %<br>estimado %{y:.1f} %<extra></extra>"))
     for v, dash in [(T, "dash"), (T2, "dot"), (Rv, "dot")]:
         if v is not None:
             fig.add_vline(x=v, line=dict(dash=dash, width=1, color="#4A5D53"))
             fig.add_hline(y=v, line=dict(dash=dash, width=1, color="#4A5D53"))
-    pulir_figura(fig, altura=380)
-    fig.update_xaxes(title="Daño real (%)", range=[0, lim])
-    fig.update_yaxes(title="Daño estimado (%)", range=[0, lim])
+    pulir_figura(fig, altura=500)
+    estilo_ejes(fig, "Daño real (%)", "Daño estimado por el modelo (%)", xk=dict(range=[0, lim]), yk=dict(range=[0, lim]))
+    fig.update_layout(legend=dict(font=dict(color=INK, size=13)))
     return fig
 
 
 # ----------------------------- Carga y filtros -----------------------------
 sidebar_marca("Vivero", "🌱", "Umbral de descarte · Evaluación de modelos")
-files = None
-with st.sidebar.expander("Cargar otros datos"):
-    files = st.file_uploader("CSV por imagen", type="csv", accept_multiple_files=True)
 local = sorted(glob.glob(os.path.join(HERE, "resultados_test_por_imagen_*.csv")))
-if files:
-    raw = cargar(files)
-elif local:
+if local:
     raw = cargar(local)
 else:
-    st.warning("Mostrando datos SIMULADOS de demostración. Subí los CSV del experimento 23 "
-               "(resultados_test_por_imagen_*.csv) para ver los resultados reales.")
+    st.warning("Mostrando datos SIMULADOS de demostración. Copiá los CSV resultados_test_por_imagen_*.csv "
+               "junto a app.py para ver los resultados reales.")
     raw = demo_data()
 raw = raw[raw["modelo"].isin(MODELOS)].copy()
 if raw.empty:
@@ -224,15 +229,18 @@ partes = [f"descarte desde {T:g} %"] + ([f"segundo umbral {T2:g} %"] if T2 else 
          ([f"revisión desde {Rv:g} %"] if Rv is not None else [])
 st.caption(f"{n_plantas} plantas de prueba · " + " · ".join(partes) + ". El daño real sale de la máscara manual.")
 
-tab1, tab2, tab3 = st.tabs(["Matrices", "Fotos", "Real vs. estimado"])
+cod_sel = st.segmented_control("Modelo", list(D), default=list(D)[0], format_func=MODELOS.get,
+                               key="modelo_sel") or list(D)[0]
+g_sel = D[cod_sel]
+CFG = {"displayModeBar": False}
+tab1, tab2, tab3 = st.tabs(["Matriz", "Fotos", "Real vs. estimado"])
 
-# ----------------------------- Matrices y comparación -----------------------------
+# ----------------------------- Matriz y comparación -----------------------------
 with tab1:
-    for col, (cod, g) in zip(st.columns(3, gap="medium"), D.items()):
-        with col, tarjeta():
-            titulo_seccion(MODELOS[cod], "Todas las especies")
-            st.plotly_chart(matriz(g, cuts_real, cuts_pred, idx_rev), width="stretch",
-                            config={"displayModeBar": False}, key=f"mx_{cod}")
+    with tarjeta():
+        titulo_seccion(f"Matriz · {MODELOS[cod_sel]}", "Modelo entrenado con todas las especies")
+        st.plotly_chart(matriz(g_sel, cuts_real, cuts_pred, idx_rev), theme=None, width="stretch",
+                        config=CFG, key="matriz")
     st.caption("Cada celda muestra la cantidad de plantas y el porcentaje de su fila (rango real). "
                "La diagonal es el rango bien asignado." +
                (" La columna 'revisión' reúne las plantas que van a revisión manual." if Rv is not None else ""))
@@ -254,16 +262,15 @@ with tab2:
     est = estado_zip()
     hay_carpeta = os.path.isdir(os.path.join(HERE, "fotos"))
     with tarjeta():
-        a, b, c = st.columns([2, 2, 1])
-        cod = a.selectbox("Modelo", list(D), format_func=MODELOS.get)
-        modo = b.selectbox("Plantas a mostrar", ["Dañadas aprobadas por error", "Buenas descartadas por error",
+        a, b, c = st.columns([2, 1, 2])
+        modo = a.selectbox("Plantas a mostrar", ["Dañadas aprobadas por error", "Buenas descartadas por error",
                                                  "A revisión", "Todas"],
                            help="Se muestran primero las de mayor diferencia entre daño real y estimado.")
-        k = c.selectbox("Cantidad", [4, 8, 12, 16], index=1)
-        marcar = st.checkbox("Marcar la zona dañada (máscara manual)", True)
-    g = D[cod]
+        k = b.selectbox("Cantidad", [4, 8, 12, 16], index=1)
+        marcar = c.checkbox("Marcar la zona dañada (máscara manual)", True)
+    st.caption(f"Resultados del modelo: {MODELOS[cod_sel]}.")
     cat = {"Dañadas aprobadas por error": FN, "Buenas descartadas por error": FP, "A revisión": REV}.get(modo)
-    sel = g if cat is None else g[g["resultado"] == cat]
+    sel = g_sel if cat is None else g_sel[g_sel["resultado"] == cat]
     sel = sel.assign(err=(sel["pred"] - sel["real"]).abs()).sort_values("err", ascending=False)
     if isinstance(est, str) and not hay_carpeta:
         st.error("fotos.zip está en el repositorio pero no es un zip válido (subida incompleta, archivo vacío "
@@ -284,7 +291,7 @@ with tab2:
                     st.caption(f"{r['image_name']} · real {r['real']:.1f} % · estimado {r['pred']:.1f} % · "
                                f"{r['resultado']}")
     with st.expander("Lista de plantas mal clasificadas o a revisión"):
-        e = g[g["resultado"] != OK].assign(error_pp=lambda x: x["pred"] - x["real"])
+        e = g_sel[g_sel["resultado"] != OK].assign(error_pp=lambda x: x["pred"] - x["real"])
         e = e[["image_name", "seed", "real", "pred", "error_pp", "resultado"]].round(2)
         e = e.sort_values("error_pp", key=abs, ascending=False)
         st.dataframe(e, hide_index=True, width="stretch")
@@ -292,8 +299,6 @@ with tab2:
 
 # ----------------------------- Real vs estimado -----------------------------
 with tab3:
-    for col, (cod, g) in zip(st.columns(3, gap="medium"), D.items()):
-        with col, tarjeta():
-            titulo_seccion(MODELOS[cod], "Líneas: umbrales elegidos")
-            st.plotly_chart(dispersion(g, T, T2, Rv), width="stretch", config={"displayModeBar": False},
-                            key=f"sc_{cod}")
+    with tarjeta():
+        titulo_seccion(f"Real vs. estimado · {MODELOS[cod_sel]}", "Las líneas marcan los umbrales elegidos.")
+        st.plotly_chart(dispersion(g_sel, T, T2, Rv), theme=None, width="stretch", config=CFG, key="dispersion")
