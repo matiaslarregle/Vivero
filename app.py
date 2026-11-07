@@ -16,13 +16,51 @@ import plotly.graph_objects as go
 import streamlit as st
 from PIL import Image
 
-from style_fitba import (aplicar_estilo, pulir_figura, encabezado_modulo, titulo_seccion,
+from style_fitba import (aplicar_estilo, pulir_figura, titulo_seccion,
                          sidebar_marca, sidebar_seccion, tarjeta, estado_vacio,
-                         GREEN, INK, COLOR_ALERT, COLOR_WARN, COLOR_HUM, COLOR_NEUTRAL)
+                         GREEN, GREEN_DARK, GREEN_SOFT, BORDER, BG_CARD, INK, MUTED, COLOR_ALERT, COLOR_WARN, COLOR_HUM, COLOR_NEUTRAL)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 st.set_page_config(page_title="Umbral de descarte | Vivero", page_icon="🌱", layout="wide")
+
+
+def modo_claro():
+    """Fuerza a modo claro los componentes que Streamlit pinta según el tema del sistema
+    (pestañas, expanders, botón de descarga, tablas, selectores), para que se lean siempre."""
+    st.markdown(f"""<style>
+    /* Pestañas */
+    button[data-baseweb="tab"] p {{ color:{MUTED} !important; font-weight:600; font-size:1rem; }}
+    button[data-baseweb="tab"][aria-selected="true"] p {{ color:{GREEN} !important; font-weight:800; }}
+    [data-baseweb="tab-highlight"] {{ background-color:{GREEN} !important; }}
+    [data-baseweb="tab-border"] {{ background-color:{BORDER} !important; }}
+    /* Expander */
+    [data-testid="stExpander"] details {{ background:{BG_CARD} !important; border:1px solid {BORDER} !important;
+        border-radius:12px; }}
+    [data-testid="stExpander"] summary, [data-testid="stExpander"] summary * {{ color:{INK} !important; }}
+    /* Botón de descarga */
+    [data-testid="stDownloadButton"] button {{ background:{GREEN} !important; border:1px solid {GREEN} !important;
+        border-radius:10px; }}
+    [data-testid="stDownloadButton"] button, [data-testid="stDownloadButton"] button * {{
+        color:#FFFFFF !important; font-weight:700; }}
+    [data-testid="stDownloadButton"] button:hover {{ background:{GREEN_DARK} !important; }}
+    /* Tablas */
+    [data-testid="stTable"] table {{ background:{BG_CARD} !important; border:1px solid {BORDER}; }}
+    [data-testid="stTable"] th {{ background:{GREEN_SOFT} !important; color:{INK} !important; font-weight:700; }}
+    [data-testid="stTable"] td {{ background:{BG_CARD} !important; color:{INK} !important; }}
+    /* Selectores, casillas y deslizadores */
+    div[data-baseweb="select"] > div {{ background:{BG_CARD} !important; border:1px solid {BORDER} !important; }}
+    div[data-baseweb="select"] span, div[data-baseweb="select"] div {{ color:{INK} !important; }}
+    div[data-baseweb="select"] svg {{ fill:{INK} !important; }}
+    [data-testid="stCheckbox"] label p, [data-testid="stCheckbox"] label span {{ color:{INK} !important; }}
+    [data-testid="stSlider"] [data-testid="stTickBarMin"], [data-testid="stSlider"] [data-testid="stTickBarMax"],
+    [data-testid="stSlider"] [data-testid="stSliderThumbValue"] {{ color:{INK} !important; }}
+    /* Avisos */
+    [data-testid="stAlert"] {{ background:{GREEN_SOFT} !important; border:1px solid {BORDER}; }}
+    </style>""", unsafe_allow_html=True)
+
+
 aplicar_estilo()
+modo_claro()
 
 MODELOS = {"06_allspecies_baseline": "Sin ponderación",
            "08_allspecies_sqrt": "Ponderación suave",
@@ -184,10 +222,7 @@ if raw.empty:
 raw["real"] = raw["mask_ratio_real"] * 100
 raw["pred"] = raw["mask_ratio_pred"] * 100
 
-sidebar_seccion("Imágenes de adaptación")
-opciones = sorted(raw["shots"].unique())
-shots = st.sidebar.radio("Adaptación", opciones, index=len(opciones) - 1, label_visibility="collapsed",
-                         format_func=lambda s: "Sin adaptación" if s == 0 else f"{s} imágenes")
+shots = 120  # la app trabaja solo con los modelos adaptados con 120 imágenes
 
 sidebar_seccion("Umbral de descarte")
 T = st.sidebar.slider("Se descarta si el daño es ≥ (% de la imagen)", 0.5, 30.0, 5.0, 0.5)
@@ -214,20 +249,12 @@ for cod in MODELOS:
     g["dañada"] = g["real"] >= T
     D[cod] = g
 if not D:
-    estado_vacio("No hay resultados para esa cantidad de imágenes de adaptación.")
+    estado_vacio("No hay resultados con 120 imágenes de adaptación en los CSV.")
     st.stop()
 
 cuts_real = [T] + ([T2] if T2 else [])
 cuts_pred = ([Rv] if Rv is not None else []) + cuts_real
 idx_rev = 1 if Rv is not None else None
-
-encabezado_modulo("Umbral de descarte",
-                  "Definí desde qué porcentaje de daño se descarta una planta y compará cómo la ubican los tres "
-                  "modelos entrenados con todas las especies.")
-n_plantas = len(next(iter(D.values())))
-partes = [f"descarte desde {T:g} %"] + ([f"segundo umbral {T2:g} %"] if T2 else []) + \
-         ([f"revisión desde {Rv:g} %"] if Rv is not None else [])
-st.caption(f"{n_plantas} plantas de prueba · " + " · ".join(partes) + ". El daño real sale de la máscara manual.")
 
 cod_sel = st.segmented_control("Modelo", list(D), default=list(D)[0], format_func=MODELOS.get,
                                key="modelo_sel") or list(D)[0]
@@ -255,7 +282,7 @@ with tab1:
     with tarjeta():
         titulo_seccion("Comparación de los tres modelos",
                        f"Con descarte desde {T:g} %: dañada = daño real ≥ {T:g} %.")
-        st.dataframe(pd.DataFrame(filas).round(1), hide_index=True, width="stretch")
+        st.table(pd.DataFrame(filas).round(1).set_index("Modelo"))
 
 # ----------------------------- Fotos -----------------------------
 with tab2:
@@ -294,7 +321,8 @@ with tab2:
         e = g_sel[g_sel["resultado"] != OK].assign(error_pp=lambda x: x["pred"] - x["real"])
         e = e[["image_name", "seed", "real", "pred", "error_pp", "resultado"]].round(2)
         e = e.sort_values("error_pp", key=abs, ascending=False)
-        st.dataframe(e, hide_index=True, width="stretch")
+        with st.container(height=420):
+            st.table(e.set_index("image_name"))
         st.download_button("Descargar CSV", e.to_csv(index=False), "plantas_a_revisar.csv")
 
 # ----------------------------- Real vs estimado -----------------------------
