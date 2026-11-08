@@ -54,6 +54,10 @@ def modo_claro():
     [data-testid="stCheckbox"] label p, [data-testid="stCheckbox"] label span {{ color:{INK} !important; }}
     [data-testid="stSlider"] [data-testid="stTickBarMin"], [data-testid="stSlider"] [data-testid="stTickBarMax"],
     [data-testid="stSlider"] [data-testid="stSliderThumbValue"] {{ color:{INK} !important; }}
+    /* Ventana de la planta */
+    div[role="dialog"] {{ background:{BG_CARD} !important; }}
+    div[role="dialog"] p, div[role="dialog"] h1, div[role="dialog"] h2, div[role="dialog"] label,
+    div[role="dialog"] span, div[role="dialog"] li {{ color:{INK} !important; }}
     /* Avisos */
     [data-testid="stAlert"] {{ background:{GREEN_SOFT} !important; border:1px solid {BORDER}; }}
     </style>""", unsafe_allow_html=True)
@@ -64,7 +68,7 @@ modo_claro()
 
 MODELOS = {"06_allspecies_baseline": "Sin ponderación",
            "08_allspecies_sqrt": "Ponderación suave",
-           "12_allspecies_inverse": "Ponderación intensa"}
+           "12_allspecies_inverse": "Ponderación agresiva"}
 REQ = ["modelo", "shots", "seed", "image_name", "mask_ratio_real", "mask_ratio_pred"]
 OK, FN, FP, REV = "Correcta", "Dañada aprobada", "Buena descartada", "A revisión"
 COLORES = {OK: COLOR_NEUTRAL, FN: COLOR_ALERT, FP: COLOR_WARN, REV: COLOR_HUM}
@@ -206,7 +210,7 @@ def dispersion(g, T, T2, Rv):
 
 
 # ----------------------------- Carga y filtros -----------------------------
-sidebar_marca("Vivero", "🌱", "Umbral de descarte · Evaluación de modelos")
+sidebar_marca("Vivero", "🌱", "Umbral de descarte")
 local = sorted(glob.glob(os.path.join(HERE, "resultados_test_por_imagen_*.csv")))
 if local:
     raw = cargar(local)
@@ -228,16 +232,23 @@ sidebar_seccion("Umbral de descarte")
 T = st.sidebar.slider("Se descarta si el daño es ≥ (% de la imagen)", 0.5, 30.0, 5.0, 0.5)
 
 sidebar_seccion("Segundo umbral")
-usa_t2 = st.sidebar.checkbox("Agregar segundo umbral", True,
-                             help="Separa daños moderados de graves. Desmarcalo para una matriz binaria.")
-T2 = st.sidebar.slider("Segundo umbral (% de la imagen)", T + 0.5, 40.0, float(max(20.0, T + 0.5)), 0.5) if usa_t2 else None
+usa_t2 = st.sidebar.checkbox("Agregar segundo umbral", False,
+                             help="Separa daños moderados de graves. Sin él, la matriz es binaria.")
+_t2 = st.sidebar.slider("Segundo umbral (% de la imagen)", T + 0.5, 40.0, float(max(20.0, T + 0.5)), 0.5,
+                        disabled=not usa_t2)
+T2 = _t2 if usa_t2 else None
 
 sidebar_seccion("Umbral de revisión")
 usa_rv = st.sidebar.checkbox("Usar umbral de revisión", False, disabled=T < 1.5,
                              help="Las plantas con daño estimado entre este valor y el umbral de descarte "
                                   "no se deciden solas: van a revisión manual.")
-Rv = st.sidebar.slider("Revisar desde (% estimado)", 0.5, T - 0.5, float(min(3.0, T - 0.5)), 0.5) \
-    if usa_rv and T >= 1.5 else None
+if T >= 1.5:
+    _rv = st.sidebar.slider("Revisar desde (% estimado)", 0.5, T - 0.5, float(min(3.0, T - 0.5)), 0.5,
+                            disabled=not usa_rv)
+    Rv = _rv if usa_rv else None
+else:
+    st.sidebar.caption("Con un descarte menor a 1,5 % no hay margen para un umbral de revisión.")
+    Rv = None
 
 # ----------------------------- Cálculo por modelo -----------------------------
 D = {}
@@ -285,6 +296,20 @@ with tab1:
         st.table(pd.DataFrame(filas).round(1).set_index("Modelo"))
 
 # ----------------------------- Fotos -----------------------------
+@st.dialog("Planta", width="large")
+def ver_planta(r, modelo, marcar_inicial):
+    marcar = st.checkbox("Mostrar la zona dañada (máscara manual)", marcar_inicial)
+    a, b = st.columns([3, 2], gap="large")
+    im = foto(r["image_name"], marcar)
+    if im is not None:
+        a.image(im)
+    else:
+        a.caption("No se encontró la foto.")
+    b.markdown(f"**Archivo:** {r['image_name']}  \n**Modelo:** {modelo}  \n"
+               f"**Daño real:** {r['real']:.1f} %  \n**Daño estimado:** {r['pred']:.1f} %  \n"
+               f"**Diferencia:** {r['pred'] - r['real']:+.1f} puntos  \n**Resultado:** {r['resultado']}")
+
+
 with tab2:
     est = estado_zip()
     hay_carpeta = os.path.isdir(os.path.join(HERE, "fotos"))
@@ -293,9 +318,9 @@ with tab2:
         modo = a.selectbox("Plantas a mostrar", ["Dañadas aprobadas por error", "Buenas descartadas por error",
                                                  "A revisión", "Todas"],
                            help="Se muestran primero las de mayor diferencia entre daño real y estimado.")
-        k = b.selectbox("Cantidad", [4, 8, 12, 16], index=1)
-        marcar = c.checkbox("Marcar la zona dañada (máscara manual)", True)
-    st.caption(f"Resultados del modelo: {MODELOS[cod_sel]}.")
+        cant = b.selectbox("Cantidad", ["8", "Todas"])
+        marcar = c.checkbox("Marcar la zona dañada (máscara manual)", False)
+    st.caption(f"Resultados del modelo: {MODELOS[cod_sel]}. Abrí una planta para ver sus datos y la máscara.")
     cat = {"Dañadas aprobadas por error": FN, "Buenas descartadas por error": FP, "A revisión": REV}.get(modo)
     sel = g_sel if cat is None else g_sel[g_sel["resultado"] == cat]
     sel = sel.assign(err=(sel["pred"] - sel["real"]).abs()).sort_values("err", ascending=False)
@@ -308,15 +333,17 @@ with tab2:
     elif sel.empty:
         estado_vacio("No hay plantas en esta categoría con los umbrales actuales.")
     else:
-        sel = sel.head(k)
+        if cant != "Todas":
+            sel = sel.head(int(cant))
         for i in range(0, len(sel), 4):
             for col, (_, r) in zip(st.columns(4), sel.iloc[i:i + 4].iterrows()):
                 with col, tarjeta():
                     im = foto(r["image_name"], marcar)
                     if im is not None:
                         st.image(im)
-                    st.caption(f"{r['image_name']} · real {r['real']:.1f} % · estimado {r['pred']:.1f} % · "
-                               f"{r['resultado']}")
+                    st.caption(f"{r['image_name']} · {r['resultado']}")
+                    if st.button("Abrir", key=f"abrir_{cod_sel}_{r['image_name']}_{r['seed']}"):
+                        ver_planta(r.to_dict(), MODELOS[cod_sel], marcar)
     with st.expander("Lista de plantas mal clasificadas o a revisión"):
         e = g_sel[g_sel["resultado"] != OK].assign(error_pp=lambda x: x["pred"] - x["real"])
         e = e[["image_name", "seed", "real", "pred", "error_pp", "resultado"]].round(2)
