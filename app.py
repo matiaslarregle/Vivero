@@ -156,6 +156,10 @@ def clasificar(real, pred, T, Rv):
     return pos, desc, rev, out
 
 
+def pct(x):
+    return f"{x:.1f}".replace(".", ",") + " %"
+
+
 def etiquetas(cuts):
     return [f"≤{cuts[0]:g}%"] + [f"{a:g}–{b:g}%" for a, b in zip(cuts, cuts[1:])] + [f">{cuts[-1]:g}%"]
 
@@ -306,7 +310,7 @@ def ver_planta(r, modelo, marcar_inicial):
     else:
         a.caption("No se encontró la foto.")
     b.markdown(f"**Archivo:** {r['image_name']}  \n**Modelo:** {modelo}  \n"
-               f"**Daño real:** {r['real']:.1f} %  \n**Daño estimado:** {r['pred']:.1f} %  \n"
+               f"**Área afectada (real):** {pct(r['real'])}  \n**Daño estimado:** {pct(r['pred'])}  \n"
                f"**Diferencia:** {r['pred'] - r['real']:+.1f} puntos  \n**Resultado:** {r['resultado']}")
 
 
@@ -314,16 +318,22 @@ with tab2:
     est = estado_zip()
     hay_carpeta = os.path.isdir(os.path.join(HERE, "fotos"))
     with tarjeta():
-        a, b, c = st.columns([2, 1, 2])
+        a, b, c, e = st.columns([2, 2, 1, 2])
         modo = a.selectbox("Plantas a mostrar", ["Dañadas aprobadas por error", "Buenas descartadas por error",
-                                                 "A revisión", "Todas"],
-                           help="Se muestran primero las de mayor diferencia entre daño real y estimado.")
-        cant = b.selectbox("Cantidad", ["8", "Todas"])
-        marcar = c.checkbox("Marcar la zona dañada (máscara manual)", False)
+                                                 "A revisión", "Todas"])
+        orden = b.selectbox("Ordenar por", ["Más afectadas primero", "Menos afectadas primero", "Mayor error del modelo"],
+                            help="El área afectada es el daño real medido con la máscara manual.")
+        cant = c.selectbox("Cantidad", ["8", "Todas"])
+        marcar = e.checkbox("Marcar la zona dañada (máscara manual)", False)
     st.caption(f"Resultados del modelo: {MODELOS[cod_sel]}. Abrí una planta para ver sus datos y la máscara.")
     cat = {"Dañadas aprobadas por error": FN, "Buenas descartadas por error": FP, "A revisión": REV}.get(modo)
     sel = g_sel if cat is None else g_sel[g_sel["resultado"] == cat]
-    sel = sel.assign(err=(sel["pred"] - sel["real"]).abs()).sort_values("err", ascending=False)
+    if orden == "Más afectadas primero":
+        sel = sel.sort_values("real", ascending=False)
+    elif orden == "Menos afectadas primero":
+        sel = sel.sort_values("real", ascending=True)
+    else:
+        sel = sel.assign(err=(sel["pred"] - sel["real"]).abs()).sort_values("err", ascending=False)
     if isinstance(est, str) and not hay_carpeta:
         st.error("fotos.zip está en el repositorio pero no es un zip válido (subida incompleta, archivo vacío "
                  "o con otro formato). Volvé a generarlo y subirlo. " + est)
@@ -341,7 +351,8 @@ with tab2:
                     im = foto(r["image_name"], marcar)
                     if im is not None:
                         st.image(im)
-                    st.caption(f"{r['image_name']} · {r['resultado']}")
+                    st.caption(f"**Área afectada: {pct(r['real'])}**  \n{r['image_name']} · estimado {pct(r['pred'])} · "
+                               f"{r['resultado']}")
                     if st.button("Abrir", key=f"abrir_{cod_sel}_{r['image_name']}_{r['seed']}"):
                         ver_planta(r.to_dict(), MODELOS[cod_sel], marcar)
     with st.expander("Lista de plantas mal clasificadas o a revisión"):
