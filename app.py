@@ -390,7 +390,3 @@ with tab3:
     with tarjeta():
         titulo_seccion(f"Real vs. estimado · {MODELOS[cod_sel]}", "Las líneas marcan los umbrales elegidos.")
         st.plotly_chart(dispersion(g_sel, T, T2, Rv), theme=None, width="stretch", config=CFG, key="dispersion")
-
-    with tarjeta():
-        titulo_seccion(f"Real vs. estimado · {MODELOS[cod_sel]}", "Las líneas marcan los umbrales elegidos.")
-        st.plotly_chart(dispersion(g_sel, T, T2, Rv), theme=None, width="stretch", config=CFG, key="dispersion")
