@@ -16,6 +16,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from PIL import Image
 
+import intro
 from style_fitba import (aplicar_estilo, pulir_figura, titulo_seccion,
                          sidebar_marca, sidebar_seccion, tarjeta, estado_vacio,
                          GREEN, GREEN_DARK, GREEN_SOFT, BORDER, BG_CARD, INK, MUTED, COLOR_ALERT, COLOR_WARN, COLOR_HUM, COLOR_NEUTRAL)
@@ -58,6 +59,8 @@ def modo_claro():
     div[role="dialog"] {{ background:{BG_CARD} !important; }}
     div[role="dialog"] p, div[role="dialog"] h1, div[role="dialog"] h2, div[role="dialog"] label,
     div[role="dialog"] span, div[role="dialog"] li {{ color:{INK} !important; }}
+    /* Gráficos: sin relleno interno, para que Streamlit no recorte el título del eje x */
+    [data-testid="stPlotlyChart"] {{ padding:0 !important; overflow:hidden; }}
     /* Avisos */
     [data-testid="stAlert"] {{ background:{GREEN_SOFT} !important; border:1px solid {BORDER}; }}
     </style>""", unsafe_allow_html=True)
@@ -186,6 +189,7 @@ def matriz(d, cuts_real, cuts_pred, idx_rev):
         z=pct, x=lp, y=lr, showscale=False, colorscale=[[0, "#EEF3EF"], [1, GREEN]], zmin=0, zmax=100,
         xgap=3, ygap=3, hovertemplate="Real %{y}<br>Estimado %{x}<br>%{z:.0f} % de la fila<extra></extra>"))
     pulir_figura(fig, altura=460)
+    fig.update_layout(margin=dict(l=105, r=20, t=30, b=95))
     estilo_ejes(fig, "Lo que estimó el modelo", "Daño real (máscara manual)",
                 xk=dict(type="category", showgrid=False), yk=dict(type="category", autorange="reversed", showgrid=False))
     for i, r in enumerate(lr):          # texto de cada celda con contraste explícito
@@ -231,6 +235,24 @@ raw["real"] = raw["mask_ratio_real"] * 100
 raw["pred"] = raw["mask_ratio_pred"] * 100
 
 shots = 120  # la app trabaja solo con los modelos adaptados con 120 imágenes
+
+# ----------------------------- Introducción -----------------------------
+# Se muestra primero; "?intro=0" en la URL entra directo a la app (lo usa capturar_pantallas.py).
+if st.query_params.get("intro") == "0":
+    st.session_state.setdefault("vista", "app")
+vista = st.session_state.setdefault("vista", "intro")
+if st.session_state.get("_vista_previa") not in (None, vista):
+    intro.subir_al_inicio()
+st.session_state["_vista_previa"] = vista
+_base = raw[raw["shots"] == shots]
+if vista == "intro" and not _base.empty:
+    _cod = "06_allspecies_baseline" if (_base["modelo"] == "06_allspecies_baseline").any() else _base["modelo"].iloc[0]
+    intro.render(_base[_base["modelo"] == _cod], foto, clasificar)
+    st.stop()
+
+if st.sidebar.button("← Ver la introducción", key="ver_intro", width="stretch"):
+    st.session_state["vista"] = "intro"
+    st.rerun()
 
 sidebar_seccion("Umbral de descarte")
 T = st.sidebar.slider("Se descarta si el daño es ≥ (% de la imagen)", 0.5, 30.0, 5.0, 0.5)
@@ -297,7 +319,7 @@ with tab1:
     with tarjeta():
         titulo_seccion("Comparación de los tres modelos",
                        f"Con descarte desde {T:g} %: dañada = daño real ≥ {T:g} %.")
-        st.table(pd.DataFrame(filas).round(1).set_index("Modelo"))
+        st.table(pd.DataFrame(filas).set_index("Modelo").map(lambda v: f"{v:.1f}".replace(".", ",")))
 
 # ----------------------------- Fotos -----------------------------
 @st.dialog("Planta", width="large")
@@ -365,6 +387,10 @@ with tab2:
 
 # ----------------------------- Real vs estimado -----------------------------
 with tab3:
+    with tarjeta():
+        titulo_seccion(f"Real vs. estimado · {MODELOS[cod_sel]}", "Las líneas marcan los umbrales elegidos.")
+        st.plotly_chart(dispersion(g_sel, T, T2, Rv), theme=None, width="stretch", config=CFG, key="dispersion")
+
     with tarjeta():
         titulo_seccion(f"Real vs. estimado · {MODELOS[cod_sel]}", "Las líneas marcan los umbrales elegidos.")
         st.plotly_chart(dispersion(g_sel, T, T2, Rv), theme=None, width="stretch", config=CFG, key="dispersion")
